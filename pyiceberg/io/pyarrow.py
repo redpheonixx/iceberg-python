@@ -176,6 +176,8 @@ from pyiceberg.utils.properties import get_first_property_value, property_as_boo
 from pyiceberg.utils.singleton import Singleton
 from pyiceberg.utils.truncate import truncate_upper_bound_binary_string, truncate_upper_bound_text_string
 
+from decimal import Decimal, Context
+
 if TYPE_CHECKING:
     from pyiceberg.table import FileScanTask, WriteTask
 
@@ -194,7 +196,7 @@ DOC = "doc"
 UTC_ALIASES = {"UTC", "+00:00", "Etc/UTC", "Z"}
 
 T = TypeVar("T")
-
+DECIMAL_REGEX = re.compile(r"decimal\((\d+),\s*(\d+)\)")
 
 @lru_cache
 def _cached_resolve_s3_region(bucket: str) -> Optional[str]:
@@ -1868,7 +1870,11 @@ class PrimitiveToPhysicalType(SchemaVisitorPerPrimitiveType[str]):
         return "FIXED_LEN_BYTE_ARRAY"
 
     def visit_decimal(self, decimal_type: DecimalType) -> str:
-        return "FIXED_LEN_BYTE_ARRAY"
+        return (
+            "INT32" if decimal_type.precision <= 9 
+            else "INT64" if decimal_type.precision <= 18 
+            else "FIXED_LEN_BYTE_ARRAY"
+        )
 
     def visit_boolean(self, boolean_type: BooleanType) -> str:
         return "BOOLEAN"
@@ -1922,7 +1928,6 @@ class StatsAggregator:
         self.current_min = None
         self.current_max = None
         self.trunc_length = trunc_length
-
         expected_physical_type = _primitive_to_physical(iceberg_type)
         if expected_physical_type != physical_type_string:
             # Allow promotable physical types
@@ -2260,6 +2265,8 @@ class DataFileStatistics:
         }
 
 
+
+
 def data_file_statistics_from_parquet_metadata(
     parquet_metadata: pq.FileMetaData,
     stats_columns: Dict[int, StatisticsCollector],
@@ -2298,7 +2305,6 @@ def data_file_statistics_from_parquet_metadata(
         # https://github.com/apache/parquet-mr/blob/ac29db4611f86a07cc6877b416aa4b183e09b353/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/metadata/ColumnChunkMetaData.java#L184
 
         row_group = parquet_metadata.row_group(r)
-
         data_offset = row_group.column(0).data_page_offset
         dictionary_offset = row_group.column(0).dictionary_page_offset
 
@@ -2310,7 +2316,7 @@ def data_file_statistics_from_parquet_metadata(
         for pos in range(parquet_metadata.num_columns):
             column = row_group.column(pos)
             field_id = parquet_column_mapping[column.path_in_schema]
-
+            
             stats_col = stats_columns[field_id]
 
             column_sizes.setdefault(field_id, 0)
@@ -2335,9 +2341,21 @@ def data_file_statistics_from_parquet_metadata(
                         col_aggs[field_id] = StatsAggregator(
                             stats_col.iceberg_type, statistics.physical_type, stats_col.mode.length
                         )
-
-                    col_aggs[field_id].update_min(statistics.min)
-                    col_aggs[field_id].update_max(statistics.max)
+                    
+                    matches=DECIMAL_REGEX.search(str(stats_col.iceberg_type))
+                    if matches and statistics.physical_type != "FIXED_LEN_BYTE_ARRAY":
+                        precision=int(matches.group(1))
+                        scale=int(matches.group(2))
+                        local_context = Context(prec=precision)
+                        decoded_min = local_context.create_decimal(Decimal(statistics.min_raw)/ (10 ** scale))
+                        decoded_max = local_context.create_decimal(Decimal(statistics.max_raw)/ (10 ** scale))
+                        col_aggs[field_id].update_min(decoded_min)
+                        col_aggs[field_id].update_max(decoded_max)
+                         
+                    
+                    else:
+                        col_aggs[field_id].update_min(statistics.min)
+                        col_aggs[field_id].update_max(statistics.max)
 
                 except pyarrow.lib.ArrowNotImplementedError as e:
                     invalidate_col.add(field_id)
