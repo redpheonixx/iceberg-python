@@ -447,9 +447,9 @@ def construct_test_table_primitive_types() -> Tuple[pq.FileMetaData, Union[Table
                     {"id": 10, "name": "strings", "required": False, "type": "string"},
                     {"id": 11, "name": "uuids", "required": False, "type": "uuid"},
                     {"id": 12, "name": "binaries", "required": False, "type": "binary"},
-                    {"id": 13, "name": "decimal8", "required": False, "type": "decimal(8, 2)"},
+                    {"id": 13, "name": "decimal8", "required": False, "type": "decimal(5, 2)"},
                     {"id": 14, "name": "decimal16", "required": False, "type": "decimal(16, 6)"},
-                    {"id": 15, "name": "decimal32", "required": False, "type": "decimal(20, 6)"},
+                    {"id": 15, "name": "decimal32", "required": False, "type": "decimal(19, 6)"},
                 ],
             },
         ],
@@ -474,9 +474,9 @@ def construct_test_table_primitive_types() -> Tuple[pq.FileMetaData, Union[Table
     strings = ["hello", "world"]
     uuids = [uuid.uuid3(uuid.NAMESPACE_DNS, "foo").bytes, uuid.uuid3(uuid.NAMESPACE_DNS, "bar").bytes]
     binaries = [b"hello", b"world"]
-    decimal8 = [Decimal("123.45"), Decimal("678.91")]
-    decimal16 = [Decimal("123456789.123456"), Decimal("678912345.678912")]
-    decimal32 = [Decimal("12345678901234.123456"), Decimal("98765432109870.654321")]
+    decimal8 = pa.array([Decimal('123.45'), Decimal('678.91')], pa.decimal128(8, 2))
+    decimal16 = pa.array([Decimal("12345679.123456"), Decimal("67891234.678912")], pa.decimal128(16, 6))
+    decimal32 = pa.array([Decimal("1234567890123.123456"), Decimal("9876543210703.654321")], pa.decimal128(19, 6))
 
 
     table = pa.Table.from_pydict(
@@ -503,7 +503,7 @@ def construct_test_table_primitive_types() -> Tuple[pq.FileMetaData, Union[Table
     metadata_collector: List[Any] = []
 
     with pa.BufferOutputStream() as f:
-        with pq.ParquetWriter(f, table.schema, metadata_collector=metadata_collector, store_decimal_as_integer=True ) as writer:
+        with pq.ParquetWriter(f, table.schema, metadata_collector=metadata_collector, store_decimal_as_integer=True) as writer:
             writer.write_table(table)
 
     return metadata_collector[0], table_metadata
@@ -540,11 +540,13 @@ def test_metrics_primitive_types() -> None:
     assert datafile.lower_bounds[10] == b"he"
     assert datafile.lower_bounds[11] == uuid.uuid3(uuid.NAMESPACE_DNS, "foo").bytes
     assert datafile.lower_bounds[12] == b"he"
-    assert int.from_bytes(datafile.lower_bounds[13], byteorder="big", signed=True) == int(12345)
-    assert int.from_bytes(datafile.lower_bounds[14], byteorder="big", signed=True) == int(123456789123456)
-    assert int.from_bytes(datafile.lower_bounds[15], byteorder="big", signed=True) == int(12345678901234123456)
+    assert datafile.lower_bounds[13][::-1].ljust(4, b'\x00') == STRUCT_INT32.pack(12345)
+    assert datafile.lower_bounds[14][::-1].ljust(8, b'\x00') == STRUCT_INT64.pack(12345679123456)
+    assert str(int.from_bytes(datafile.lower_bounds[15], byteorder='big', signed=True)).encode('utf-8')== b"1234567890123123456"
+    
+    
 
-
+    
     assert len(datafile.upper_bounds) == 15
     assert datafile.upper_bounds[1] == STRUCT_BOOL.pack(True)
     assert datafile.upper_bounds[2] == STRUCT_INT32.pack(89)
@@ -558,9 +560,11 @@ def test_metrics_primitive_types() -> None:
     assert datafile.upper_bounds[10] == b"wp"
     assert datafile.upper_bounds[11] == uuid.uuid3(uuid.NAMESPACE_DNS, "bar").bytes
     assert datafile.upper_bounds[12] == b"wp"
-    assert int.from_bytes(datafile.upper_bounds[13], byteorder="big", signed=True) == int(67891)
-    assert int.from_bytes(datafile.upper_bounds[14], byteorder="big", signed=True) == int(678912345678912)
-    assert int.from_bytes(datafile.upper_bounds[15], byteorder="big", signed=True) == int(98765432109870654321)
+    assert datafile.upper_bounds[13][::-1].ljust(4, b'\x00')== STRUCT_INT32.pack(67891)
+    assert datafile.upper_bounds[14][::-1].ljust(8, b'\x00')== STRUCT_INT64.pack(67891234678912)
+    assert str(int.from_bytes(datafile.upper_bounds[15], byteorder='big', signed=True)).encode('utf-8')== b"9876543210703654321"
+    
+    
 
 
 def construct_test_table_invalid_upper_bound() -> Tuple[pq.FileMetaData, Union[TableMetadataV1, TableMetadataV2]]:

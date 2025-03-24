@@ -2265,7 +2265,23 @@ class DataFileStatistics:
         }
 
 
+def pad(b):
+# Left pad 0 or 1 based on leading digit (2's complement rules)
+ if b[-1] & 128 == 0:
+    return b.ljust(16, b'\x00')
+ else:
+    return b.ljust(16, b'\xff')
 
+def to_pyarrow_bytes(b):
+# converts from big-endian (parquet's repr) to little endian (arrow's repr)
+# and then pads to 16 bytes
+ return pad(b[::-1])
+
+
+def decode_stats_decimal(b):
+ pyarrow_bytes = to_pyarrow_bytes(b)
+ arr = pa.Array.from_buffers(pa.decimal128(12, 4), 1, [None, pa.py_buffer(pyarrow_bytes)], 0)
+ return arr[0].as_py()
 
 def data_file_statistics_from_parquet_metadata(
     parquet_metadata: pq.FileMetaData,
@@ -2342,17 +2358,14 @@ def data_file_statistics_from_parquet_metadata(
                             stats_col.iceberg_type, statistics.physical_type, stats_col.mode.length
                         )
                     
-                    matches=DECIMAL_REGEX.search(str(stats_col.iceberg_type))
-                    if matches and statistics.physical_type != "FIXED_LEN_BYTE_ARRAY":
-                        precision=int(matches.group(1))
-                        scale=int(matches.group(2))
-                        local_context = Context(prec=precision)
-                        decoded_min = local_context.create_decimal(Decimal(statistics.min_raw)/ (10 ** scale))
-                        decoded_max = local_context.create_decimal(Decimal(statistics.max_raw)/ (10 ** scale))
-                        col_aggs[field_id].update_min(decoded_min)
-                        col_aggs[field_id].update_max(decoded_max)
-                         
                     
+                    
+                    if isinstance(stats_col.iceberg_type, DecimalType) and statistics.physical_type != "FIXED_LEN_BYTE_ARRAY":
+                        precision= stats_col.iceberg_type.precision
+                        scale = stats_col.iceberg_type.scale
+                        decimal_type = pa.decimal128(precision, scale)
+                        col_aggs[field_id].update_min(pa.array([Decimal(statistics.min_raw)/ (10 ** scale)], decimal_type)[0].as_py())
+                        col_aggs[field_id].update_max(pa.array([Decimal(statistics.max_raw)/ (10 ** scale)], decimal_type)[0].as_py())
                     else:
                         col_aggs[field_id].update_min(statistics.min)
                         col_aggs[field_id].update_max(statistics.max)
